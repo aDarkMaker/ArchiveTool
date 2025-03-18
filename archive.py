@@ -4,10 +4,11 @@ import sys
 import requests
 import tkinter as tk
 from datetime import datetime
-from threading import Thread
+from threading import Thread, Event
 from tkinter import ttk, scrolledtext, filedialog
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -16,6 +17,10 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.oxml.ns import qn
 from urllib.parse import urlparse
+import warnings
+from webdriver_manager.chrome import ChromeDriverManager
+
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 # ------------------------- 核心功能函数 -------------------------
 def sanitize_filename(filename):
@@ -26,23 +31,30 @@ def get_web_content(url):
     """使用Selenium获取动态网页内容"""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
     chrome_options.add_argument("accept-language=zh-CN,zh;q=0.9")
     
-    driver = webdriver.Chrome(options=chrome_options)
-    driver.implicitly_wait(15)
-    
     try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+        driver.implicitly_wait(15)
+        
         driver.get(url)
-        WebDriverWait(driver, 10).until(
+        WebDriverWait(driver, 15).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, '#publish_time, .rich_media_meta_text'))
         )
         return driver.page_source
     except Exception as e:
         print(f"页面加载异常: {str(e)}")
-        return driver.page_source
+        return None
     finally:
-        driver.quit()
+        if 'driver' in locals():
+            driver.quit()
 
 def parse_date(publish_time_str):
     """增强的日期解析函数"""
@@ -171,14 +183,46 @@ class WeChatDownloaderGUI:
         self.master = master
         master.title("推文归档Helper 测试版")
         master.geometry("800x700")
-        master.iconbitmap("icon.ico")
+        
+        # 图标加载优化
+        self.load_application_icon()
         
         master.resizable(False, False)
-    
+        self.stop_event = Event()
         self.create_widgets()
         self.original_stdout = sys.stdout
         sys.stdout = self
-    
+        
+        # 窗口关闭事件绑定
+        master.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def load_application_icon(self):
+        """加载应用程序图标"""
+        try:
+            if getattr(sys, 'frozen', False):
+                # 打包后的路径
+                base_path = sys._MEIPASS
+            else:
+                # 开发环境路径
+                base_path = os.path.dirname(os.path.abspath(__file__))
+            
+            icon_path = os.path.join(base_path, 'icon.ico')
+            print(f"尝试加载图标路径: {icon_path}")
+            
+            if os.path.exists(icon_path):
+                self.master.iconbitmap(icon_path)
+            else:
+                print("警告: 图标文件未找到，使用默认图标")
+        except Exception as e:
+            print(f"图标加载错误: {str(e)}")
+
+    def on_close(self):
+        """窗口关闭时的清理操作"""
+        self.stop_event.set()
+        self.master.destroy()
+        sys.stdout = self.original_stdout
+        os._exit(0)
+
     def create_widgets(self):
         # URL输入
         url_frame = ttk.Frame(self.master)
@@ -208,28 +252,28 @@ class WeChatDownloaderGUI:
         self.start_btn = ttk.Button(btn_frame, text="开始下载", command=self.start_download)
         self.start_btn.pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="清空日志", command=self.clear_log).pack(side=tk.LEFT, padx=5)
-    
+
     def select_path(self):
         path = filedialog.askdirectory()
         if path:
             self.path_var.set(path)
-    
+
     def write(self, text):
         self.log_area.insert(tk.END, text)
         self.log_area.see(tk.END)
-    
+
     def flush(self):
         pass
-    
+
     def clear_log(self):
         self.log_area.delete(1.0, tk.END)
-    
+
     def start_download(self):
         url = self.url_entry.get().strip()
         base_dir = self.path_var.get().strip()
         
-        if not url.startswith('http'):
-            self.log_area.insert(tk.END, "错误：请输入有效的URL\n")
+        if not re.match(r'^https?://mp\.weixin\.qq\.com/s\S*', url):
+            self.log_area.insert(tk.END, "错误：请输入有效的微信公众号文章链接\n")
             return
         
         if not base_dir:
@@ -249,15 +293,19 @@ class WeChatDownloaderGUI:
                 self.start_btn.config(state=tk.NORMAL)
         
         Thread(target=run_download, daemon=True).start()
-    
+
     def __del__(self):
         sys.stdout = self.original_stdout
 
 def modified_main(url, base_dir):
-    """修改后的主逻辑"""
+    """带中断检查的主逻辑"""
     try:
         print("="*50 + "\n开始处理文章...")
         html = get_web_content(url)
+        if not html:
+            print("错误：无法获取网页内容")
+            return
+        
         date_str, title, content_paragraphs, imgs = parse_wechat_article(html)
         
         print(f"解析结果：\n日期：{date_str}\n标题：{title[:50]}...\n段落数：{len(content_paragraphs)}\n图片数：{len(imgs)}\n")

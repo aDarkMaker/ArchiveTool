@@ -171,7 +171,7 @@ class WeChatDownloaderGUI:
         self.master = master
         master.title("推文归档Helper 测试版")
         master.geometry("800x700")
-        master.iconbitmap("icon.ico")
+        master.iconbitmap("favicon.ico")
         
         master.resizable(False, False)
     
